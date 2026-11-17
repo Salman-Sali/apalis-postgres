@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- fix: the insert listener reconnects after a lost connection. `PgListener::into_stream` ends
+  at its first error, which a Postgres restart produces, so both the shared listener
+  (`SharedPostgresStorage`) and the per-storage one (`new_with_notify`) stopped for good and
+  every queue fell back to the poll alone. Both now use one stream that drops a failed
+  listener and opens a new one (backoff 100 ms doubling to 5 s), ending only when the pool
+  closes. A queue whose fetcher is gone no longer panics the shared listener.
+- fix: the poll fallback's idle backoff is capped at 5 s instead of 5 min, so a job whose
+  notification was missed starts within seconds.
+
 ## [1.0.0-rc.8] - 2026-05-08
 
 - feat: idempotency for tasks (#81)

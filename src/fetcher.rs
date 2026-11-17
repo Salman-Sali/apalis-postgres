@@ -16,6 +16,9 @@ use ulid::Ulid;
 
 use crate::{CompactType, Config, PgContext, PgTask, from_row::PgTaskRow};
 
+/// The longest wait between two polls of an idle queue.
+const MAX_POLL_BACKOFF: Duration = Duration::from_secs(5);
+
 async fn fetch_next(
     pool: PgPool,
     config: Config,
@@ -157,9 +160,12 @@ impl Stream for PgPollFetcher<CompactType> {
 }
 
 impl<Compact> PgPollFetcher<Compact> {
+    /// The poll is the fallback for jobs whose notification was missed (sent while the
+    /// listener was reconnecting), so its wait stays short: such a job starts within
+    /// [`MAX_POLL_BACKOFF`], not minutes later.
     fn next_backoff(&self, current: Duration) -> Duration {
         let doubled = current * 2;
-        std::cmp::min(doubled, Duration::from_secs(60 * 5))
+        std::cmp::min(doubled, MAX_POLL_BACKOFF)
     }
 
     #[allow(unused)]

@@ -35,6 +35,7 @@ pub use crate::{
 mod ack;
 mod fetcher;
 mod from_row;
+mod listener;
 
 pub type PgContext = apalis_sql::context::SqlContext<PgPool>;
 mod queries;
@@ -366,14 +367,8 @@ impl<Args, Decode> PostgresStorage<Args, CompactType, Decode, PgNotify> {
         let pool = self.pool.clone();
         let worker_id = worker.name().to_owned();
         let namespace = self.config.queue().to_string();
-        let listener = async move {
-            let mut fetcher = PgListener::connect_with(&pool)
-                .await
-                .expect("Failed to create listener");
-            fetcher.listen("apalis::job::insert").await.unwrap();
-            fetcher
-        };
-        let fetcher = stream::once(listener).flat_map(|f| f.into_stream());
+        // Re-opened whenever it is lost (`listener::insert_events`).
+        let fetcher = listener::insert_events(pool);
         let pool = self.pool.clone();
         let register_worker = initial_heartbeat(
             self.pool.clone(),
@@ -384,14 +379,9 @@ impl<Args, Decode> PostgresStorage<Args, CompactType, Decode, PgNotify> {
         .map_ok(|_| None);
         let register = stream::once(register_worker);
         let lazy_fetcher = fetcher
-            .into_stream()
-            .filter_map(move |notification| {
+            .filter_map(move |ev: InsertEvent| {
                 let namespace = namespace.clone();
                 async move {
-                    let pg_notification = notification.ok()?;
-                    let payload = pg_notification.payload();
-                    let ev: InsertEvent = serde_json::from_str(payload).ok()?;
-
                     if ev.job_type == namespace {
                         return Some(ev.id);
                     }

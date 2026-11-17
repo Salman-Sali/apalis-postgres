@@ -31,8 +31,10 @@ use futures::{
     lock::Mutex,
     stream::{self, BoxStream, select},
 };
-use sqlx::{PgPool, postgres::PgListener};
+use sqlx::PgPool;
 use ulid::Ulid;
+
+use crate::listener::insert_events;
 
 pub struct SharedPostgresStorage<Compact = CompactType, Codec = JsonCodec<CompactType>> {
     pool: PgPool,
@@ -49,30 +51,18 @@ impl SharedPostgresStorage {
         let instances = registry.clone();
         Self {
             pool,
+            // One LISTEN connection for every queue, re-opened whenever it is lost
+            // (`listener::insert_events`).
             drive: async move {
-                let mut listener = PgListener::connect_with(&p).await.unwrap();
-                listener.listen("apalis::job::insert").await.unwrap();
-                listener
-                    .into_stream()
-                    .filter_map(|notification| {
-                        let instances = instances.clone();
-                        async move {
-                            let pg_notification = notification.ok()?;
-                            let payload = pg_notification.payload();
-                            let ev: InsertEvent = serde_json::from_str(payload).ok()?;
-                            let instances = instances.lock().await;
-                            if instances.get(&ev.job_type).is_some() {
-                                return Some(ev);
-                            }
-                            None
-                        }
-                    })
-                    .for_each(|ev| {
+                insert_events(p)
+                    .for_each(|ev: InsertEvent| {
                         let instances = instances.clone();
                         async move {
                             let mut instances = instances.lock().await;
-                            let sender = instances.get_mut(&ev.job_type).unwrap();
-                            sender.send(ev.id).await.unwrap();
+                            if let Some(sender) = instances.get_mut(&ev.job_type) {
+                                // A queue whose fetcher is gone must not stop the others.
+                                let _ = sender.send(ev.id).await;
+                            }
                         }
                     })
                     .await;
